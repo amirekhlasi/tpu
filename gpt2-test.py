@@ -34,8 +34,8 @@ def _data_builder(file_path, batch_size, pad_size):
 
 def data_fn():
     data_path = "data"
-    train = _data_builder(os.path.join(data_path, "train.txt"), 16, 1025)
-    dev = _data_builder(os.path.join(data_path, "test.txt"), 16, 1025)
+    train = _data_builder(os.path.join(data_path, "train.txt"), 8, 1025)
+    dev = _data_builder(os.path.join(data_path, "test.txt"), 8, 1025)
     data_spec = estimator.DataSpec(train=train, dev=dev)
     return data_spec
 
