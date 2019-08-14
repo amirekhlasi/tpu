@@ -38,6 +38,7 @@ def model_fn(data, training):
     loss = tf.keras.losses.binary_crossentropy(y, x)
     loss = tf.reduce_mean(loss)
     accuracy = tf.keras.metrics.binary_accuracy(y, x)
+    accuracy = tf.reduce_mean(accuracy)
     metric = {"accuracy": accuracy}
     optimizer = tf.train.GradientDescentOptimizer(1e-3)
     trainable_variables = layer1.weights + layer2.weights
