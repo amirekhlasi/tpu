@@ -8,7 +8,7 @@ tf.enable_eager_execution()
 
 # Model in eager mode
 model_path = "model"
-with open(os.path.join(model_path, "hpararms.json")) as f:
+with open(os.path.join(model_path, "hparams.json")) as f:
     config = json.load(f)
 model = GPT2(config, name="gpt2")
 x = tf.zeros([0, 0], dtype=tf.int32)

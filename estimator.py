@@ -116,6 +116,8 @@ class ModelSpec(object):
                     raise ValueError("metric tensors must have dtype tf.float32")
                 if tensor.shape.as_list() != []:
                     raise ValueError("metric tensors must be scalar")
+        else:
+            metric = dict()
         self.metric = metric
         if global_step is not None:
             if not isinstance(global_step, tf.Variable):
@@ -331,9 +333,7 @@ class Estimator(object):
             self._cpu_variables_assign = {v.name: v.assign(plc) for v, plc in
                                           zip(tf.global_variables(), self._cpu_variables_plc.values())}
             self._variables_name = list(self._cpu_variables.keys())
-            self._metric_keys = None
-            if self._cpu_model_spec.metric is not None:
-                self._metric_keys, _ = _utils.flatten(self._cpu_model_spec.metric)
+            self._metric_keys, _ = _utils.flatten(self._cpu_model_spec.metric)
 
     def _build_tpu_model(self, model_fn):
 
@@ -358,9 +358,8 @@ class Estimator(object):
 
             opt = tf.cond(training, true_fn, false_fn)
             returns = [loss, opt]
-            if self._tpu_model_spec.metric is not None:
-                metric_keys, metric_values = _utils.flatten(self._tpu_model_spec.metric)
-                returns = returns + metric_values
+            metric_keys, metric_values = _utils.flatten(self._tpu_model_spec.metric)
+            returns = returns + metric_values
             return returns
 
         def train(training, *data):
@@ -408,10 +407,8 @@ class Estimator(object):
             results = tf.tpu.shard(train, inputs, self._run_config.num_cores)
             results = [tf.reduce_mean(res) for res in results]
             self._tpu_loss = results[0]
-            self._tpu_metrics = None
-            if self._cpu_model_spec.metric is not None:
-                metrics = results[1:]
-                self._tpu_metrics = dict(zip(self._cpu_model_spec.metric.keys(), metrics))
+            metrics = results[1:]
+            self._tpu_metrics = dict(zip(self._cpu_model_spec.metric.keys(), metrics))
             self._tpu_variables = {name: v for name, v in zip(self._variables_name, tf.global_variables())}
             self._tpu_variables_plc = {name: tf.placeholder(v.dtype, v.shape) for name, v in self._cpu_variables.items()}
             self._tpu_variables_assign = {name: v.assign(u)
@@ -448,10 +445,7 @@ class Estimator(object):
         dev_inputs = inputs[ln:]
         train_inputs = [_input.numpy() for _input in train_inputs]
         dev_inputs = [_input.numpy() for _input in dev_inputs]
-        if self._tpu_metrics is None:
-            operations = self._tpu_loss
-        else:
-            operations = [self._tpu_loss, self._tpu_metrics]
+        operations = [self._tpu_loss, self._tpu_metrics]
         feed_dict = dict(zip(self._tpu_inputs_plc, train_inputs))
         feed_dict[self._tpu_training] = True
         train_result = self._tpu_session.run(operations, feed_dict)
@@ -462,25 +456,17 @@ class Estimator(object):
         with self._tensorboard_writer.as_default(), tf.contrib.summary.always_record_summaries():
             print("round: ", self._round)
             print("train: ")
-            if self._tpu_metrics is None:
-                print("loss: ", train_result)
-                tf.contrib.summary.scalar("train/loss", train_result, step=self._round)
-            else:
-                print("loss: ", train_result[0])
-                tf.contrib.summary.scalar("train/loss", train_result[0], step=self._round)
-                for key, value in train_result[1].items():
-                    print(key + ": ", value)
-                    tf.contrib.summary.scalar("train/" + key, value, step=self._round)
+            print("loss: ", train_result[0])
+            tf.contrib.summary.scalar("train/loss", train_result[0], step=self._round)
+            for key, value in train_result[1].items():
+                print(key + ": ", value)
+                tf.contrib.summary.scalar("train/" + key, value, step=self._round)
             print("eval: ")
-            if self._tpu_metrics is None:
-                print("loss: ", dev_result)
-                tf.contrib.summary.scalar("eval/loss", dev_result, step=self._round)
-            else:
-                print("loss: ", dev_result[0])
-                tf.contrib.summary.scalar("train/loss", dev_result[0], step=self._round)
-                for key, value in dev_result[1].items():
-                    print(key + ": ", value)
-                    tf.contrib.summary.scalar("train/" + key, value, step=self._round)
+            print("loss: ", dev_result[0])
+            tf.contrib.summary.scalar("train/loss", dev_result[0], step=self._round)
+            for key, value in dev_result[1].items():
+                print(key + ": ", value)
+                tf.contrib.summary.scalar("train/" + key, value, step=self._round)
             print("\n\n")
 
         return tf.zeros([], tf.bool)
