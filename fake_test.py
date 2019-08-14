@@ -2,6 +2,8 @@ import tensorflow as tf
 import numpy as np
 import estimator
 
+tf.enable_eager_execution()
+
 fake_train = np.random.uniform(-10, 10, size=[1024, 50]).astype(np.float32)
 fake_dev = np.random.uniform(-10, 10, size=[128, 50]).astype(np.float32)
 
