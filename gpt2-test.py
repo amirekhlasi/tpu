@@ -21,11 +21,11 @@ def _data_builder(file_path, batch_size, pad_size):
     data = data.repeat()
 
     def _map(x):
-       x = tf.expand_dims(x, 0)
-       tokens = tf.strings.split(x, " ").values
-       tokens = tf.strings.to_number(tokens, tf.int32)
-       length = tf.shape(tokens)[0]
-       return {"tokens": tokens, "length": length}
+        x = tf.expand_dims(x, 0)
+        tokens = tf.strings.split(x, " ").values
+        tokens = tf.strings.to_number(tokens, tf.int32)
+        length = tf.shape(tokens)[0]
+        return {"tokens": tokens, "length": length}
 
     data = data.map(_map)
     output_shape = {"tokens": tf.TensorShape([pad_size]), "length": tf.TensorShape([])}
