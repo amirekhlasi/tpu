@@ -160,14 +160,14 @@ class DataSpec(object):
             raise ValueError("train must be instance of tf.data.Data")
         if not isinstance(dev, tf.data.Dataset):
             raise ValueError("dev must be instance of tf.data.Data")
-        if train.output_types != dev.output_types:
-            raise ValueError("train and dev outputs must have same nested structure and dtype")
-        if train.output_shapes != dev.output_shapes:
-            raise ValueError("train and dev outputs must have same shapes")
         key_maps, values = _utils.flatten(train.output_shapes)
         for v in values:
             if not v.is_fully_defined():
                 raise ValueError("all outputs shapes must be fully defined")
+        if train.output_types != dev.output_types:
+            raise ValueError("train and dev outputs must have same nested structure and dtype")
+        if train.output_shapes != dev.output_shapes:
+            raise ValueError("train and dev outputs must have same shapes")
         if isinstance(key_maps, tuple):
             raise ValueError("the exterior structure of data output should not be tuple")
         self.key_maps = key_maps
