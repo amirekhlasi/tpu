@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 import os
+import time
 
 
 class _utils(object):
@@ -196,20 +197,22 @@ class RunConfig(object):
         model_dir: A directory for saving checkpoints and Tensorboard summaries. If the directory is not empty,
                    the model will start training from the latest checkpoint.
         save_every_rounds: the model will save checkpoint for every "save_every_rounds" round.
-        save_data_iteration: if True, the checkpoints include data iterator state too.
+        restore_data_state: if True, the model will restore the latest data state
         checkpoint_max_keep: maximum number of checkpoints too keep.
         num_cores: the numbers of tpu cores.
+        save_delay: delay time for saving checkpoint. it may be needed for synchronization of colab and drive
     """
     def __init__(self, train_steps_per_round, eval_steps_per_round,
-                 model_dir, save_every_rounds=20, save_data_iterator=True,
-                 checkpoint_max_keep=5, num_cores=8):
+                 model_dir, save_every_rounds=20, restore_data_state=True,
+                 checkpoint_max_keep=5, num_cores=8, save_delay=0.0):
         self.train_steps_per_round = train_steps_per_round
         self.eval_steps_per_round = eval_steps_per_round
         self.model_dir = model_dir
         self.save_every_rounds = save_every_rounds
-        self.save_data_iterator = save_data_iterator
+        self.restore_data_state = restore_data_state
         self.checkpoint_max_keep = checkpoint_max_keep
         self.num_cores = num_cores
+        self.save_delay = save_delay
 
     @staticmethod
     def from_dict(dictionary):
@@ -220,9 +223,10 @@ class RunConfig(object):
             "eval_steps_per_round",
             "model_dir",
             "save_every_rounds",
-            "save_data_iterator",
+            "restore_data_state",
             "checkpoint_max_keep",
-            "num_cores"
+            "num_cores",
+            "save_delay"
         ]
         for key in dictionary.keys():
             if key not in inputs:
@@ -278,6 +282,7 @@ class Estimator(object):
         self._tpu_session = tf.Session(target=tpu_address, graph=self._tpu_graph)
         self._round = 0
         self._build_graph()
+        self._build_restore_data_graph()
         with self._cpu_graph.as_default():
             self._cpu_session.run(tf.global_variables_initializer())
         with self._tpu_graph.as_default():
@@ -334,6 +339,27 @@ class Estimator(object):
                                           zip(tf.global_variables(), self._cpu_variables_plc.values())}
             self._variables_name = list(self._cpu_variables.keys())
             self._metric_keys, _ = _utils.flatten(self._cpu_model_spec.metric)
+            self._train_step = tf.Variable(0, dtype=tf.int64, name="train_step")
+            self._dev_step = tf.Variable(0, dtype=tf.int64, name="eval_step")
+
+    def _build_restore_data_graph(self):
+        def _restore(steps, iterator):
+            def body(step):
+                with tf.control_dependencies(iterator.get_next()):
+                    step = step + 1
+                return step
+
+            def cond(step):
+                return step < steps
+            op = tf.while_loop(cond, body, [tf.zeros([], tf.int64)], parallel_iterations=1)
+            return op
+        with self._cpu_graph.as_default():
+            steps = self._train_step // self._run_config.train_steps_per_round
+            op1 = _restore(steps, self._train_iterator)
+            steps = self._dev_step // self._run_config.eval_steps_per_round
+            op2 = _restore(steps, self._dev_iterator)
+            self._restore_data_op = tf.group(op1, op2)
+
 
     def _build_tpu_model(self, model_fn):
 
@@ -477,22 +503,35 @@ class Estimator(object):
             self._train_iterator = self._train_data.make_one_shot_iterator()
             self._dev_iterator = self._dev_data.make_one_shot_iterator()
 
-            def body(round, flag):
-                train_data = self._train_iterator.get_next()
-                dev_data = self._dev_iterator.get_next()
-                inputs = train_data + dev_data
-                with tf.control_dependencies([flag]):
-                    flag = tf.py_function(self._run_round, inputs, tf.bool)
-                flag.set_shape([])
-                round = round + 1
-                return round, flag
+            def _get_inputs(fake=False):
+                def true_fn():
+                    train = [tf.zeros(shape, type) for shape, type in
+                              zip(self._train_data.output_shapes, self._train_data.output_types)]
+                    dev = [tf.zeros(shape, type) for shape, type in
+                              zip(self._dev_data.output_shapes, self._dev_data.output_types)]
+                    return tuple(train + dev)
+                def false_fn():
+                    output = self._train_iterator.get_next() + self._dev_iterator.get_next()
+                    return output
+                fake = tf.convert_to_tensor(fake)
+                inputs = tf.cond(fake, true_fn, false_fn)
+                return inputs
 
-            def cond(round, flag):
+            def body(round, inputs):
+                flag = tf.py_function(self._run_round, inputs, tf.bool)
+                fake = tf.equal(round, self._num_round - 1)
+                inputs = _get_inputs(fake)
+                with tf.control_dependencies([flag]):
+                    round = round + 1
+                return round, inputs
+
+            def cond(round, inputs):
                 return round < self._num_round
 
             round = tf.zeros([], tf.int32)
-            flag = tf.zeros([], tf.bool)
-            _, self._run_opt = tf.while_loop(cond, body, [round, flag], parallel_iterations=2)
+            fake = tf.equal(round, self._num_round - 1)
+            inputs = _get_inputs(fake)
+            self._run_opt, _ = tf.while_loop(cond, body, [round, inputs], parallel_iterations=1)
 
     def _create_checkpoint(self):
         with self._cpu_graph.as_default():
@@ -504,21 +543,21 @@ class Estimator(object):
                     self._tpu_var_ckpt.append(self._tpu_model_spec.global_step)
                 self._cpu_var_ckpt_names = [v.name for v in self._cpu_var_ckpt]
                 ckpt = dict(zip(self._cpu_var_ckpt_names, self._cpu_var_ckpt))
-                if self._run_config.save_data_iterator:
-                    ckpt["train_iterator"] = self._train_iterator
-                    ckpt["dev_iterator"] = self._dev_iterator
+                ckpt[self._train_step.name] = self._train_step
+                ckpt[self._dev_step.name] = self._dev_step
                 self._checkpoint = tf.train.Checkpoint(**ckpt)
                 path = os.path.join(self._run_config.model_dir, "checkpoints")
                 self._checkpoint_manager = tf.train.CheckpointManager(self._checkpoint, path,
                                                                       max_to_keep=self._run_config.checkpoint_max_keep)
         if self._checkpoint_manager.latest_checkpoint is not None:
-            self.restore(self._checkpoint_manager.latest_checkpoint)
+            self.restore(self._checkpoint_manager.latest_checkpoint, self._run_config.restore_data_state)
 
     def _save_checkpoint(self):
         self._sync_down(self._cpu_var_ckpt_names)
         with self._cpu_graph.as_default():
             with self._cpu_session.as_default():
                 self._checkpoint_manager.save()
+        time.sleep(self._run_config.save_delay)
 
     def _create_tensorboard_writer(self):
         path = os.path.join(self._run_config.model_dir, "tensorboard/")
@@ -603,7 +642,9 @@ class Estimator(object):
         """
         q = rounds // self._run_config.save_every_rounds
         r = rounds % self._run_config.save_every_rounds
-        rounds = q * [self._run_config.save_every_rounds] + [r]
+        rounds = q * [self._run_config.save_every_rounds]
+        if r > 0:
+            rounds.append(r)
         for num_round in rounds:
             feed_dict = {self._num_round: num_round}
             self._cpu_session.run(self._run_opt, feed_dict)
@@ -611,14 +652,21 @@ class Estimator(object):
             self._save_checkpoint()
             print("checkpoint saved \n\n")
 
-    def restore(self, checkpoint_path):
+    def restore(self, checkpoint_path, restore_data_state=False):
         """
 
         Restore from a checkpoint file. if the model_dir in run_config is not empty, the checkpoint
         wil be restored automatically from the latest checkpoint.
+        if restore_data_state is True, then the data checkpoint will also be restored
 
         """
+        print("restoring checkpoint ...")
         with self._cpu_graph.as_default():
             with self._cpu_session.as_default():
-                self._checkpoint.restore(checkpoint_path)
+                self._checkpoint.restore(checkpoint_path).run_restore_ops()
+                if restore_data_state:
+                    self._restore_data_op.run()
+                else:
+                    self._cpu_session.run([self._train_step.initializer, self._dev_step.initializer])
         self._sync_up()
+        print("restoring checkpoint completed.\n\n")
