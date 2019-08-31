@@ -1,7 +1,7 @@
 import tensorflow as tf
 import numpy as np
 import os
-import time
+from google.colab import drive
 
 
 class _utils(object):
@@ -194,17 +194,20 @@ class RunConfig(object):
     the configuration includes:
         train_steps_per_round: training steps for each round.
         eval_steps_per_round: evaluation steps for each round.
-        model_dir: A directory for saving checkpoints and Tensorboard summaries. If the directory is not empty,
+        model_dir: A directory for saving checkpoints. If the directory is not empty,
                    the model will start training from the latest checkpoint.
         save_every_rounds: the model will save checkpoint for every "save_every_rounds" round.
         restore_data_state: if True, the model will restore the latest data state
         checkpoint_max_keep: maximum number of checkpoints too keep.
         num_cores: the numbers of tpu cores.
-        save_delay: delay time for saving checkpoint. it may be needed for synchronization of colab and drive
+        drive_path: if it is specified, then the system will flush and remount drive connection after saving each checkpoint
+                    in order to avoid problems with drive syncnorization.
+        WARNING: if you are using drive_path option, do not read the data from drive directly, instead copy data to local memory of colab.
+                 also your current working path should not be a child of drive path.
     """
     def __init__(self, train_steps_per_round, eval_steps_per_round,
                  model_dir, save_every_rounds=20, restore_data_state=True,
-                 checkpoint_max_keep=5, num_cores=8, save_delay=0.0):
+                 checkpoint_max_keep=5, num_cores=8, drive_path=None):
         self.train_steps_per_round = train_steps_per_round
         self.eval_steps_per_round = eval_steps_per_round
         self.model_dir = model_dir
@@ -212,7 +215,7 @@ class RunConfig(object):
         self.restore_data_state = restore_data_state
         self.checkpoint_max_keep = checkpoint_max_keep
         self.num_cores = num_cores
-        self.save_delay = save_delay
+        self.drive_path = drive_path
 
     @staticmethod
     def from_dict(dictionary):
@@ -226,7 +229,7 @@ class RunConfig(object):
             "restore_data_state",
             "checkpoint_max_keep",
             "num_cores",
-            "save_delay"
+            "drive_path"
         ]
         for key in dictionary.keys():
             if key not in inputs:
@@ -261,8 +264,6 @@ class Estimator(object):
 
     """
     def __init__(self, model_fn, data_fn, run_config):
-        if not tf.executing_eagerly():
-            raise OSError("tpu-Estimator only works on eager context")
         if not callable(model_fn):
             raise ValueError("model_fn should be callable")
         if not callable(data_fn):
@@ -290,8 +291,6 @@ class Estimator(object):
             self._tpu_session.run(tf.global_variables_initializer())
         self._create_checkpoint()
         self._sync_up()
-        self._create_tensorboard_writer()
-
 
     def _build_dataset(self, data_fn):
         with self._cpu_graph.as_default():
@@ -479,22 +478,16 @@ class Estimator(object):
         feed_dict[self._tpu_training] = False
         dev_result = self._tpu_session.run(operations, feed_dict)
         self._round += 1
-        with self._tensorboard_writer.as_default(), tf.contrib.summary.always_record_summaries():
-            print("round: ", self._round)
-            print("train: ")
-            print("loss: ", train_result[0])
-            tf.contrib.summary.scalar("train/loss", train_result[0], step=self._round)
-            for key, value in train_result[1].items():
-                print(key + ": ", value)
-                tf.contrib.summary.scalar("train/" + key, value, step=self._round)
-            print("eval: ")
-            print("loss: ", dev_result[0])
-            tf.contrib.summary.scalar("train/loss", dev_result[0], step=self._round)
-            for key, value in dev_result[1].items():
-                print(key + ": ", value)
-                tf.contrib.summary.scalar("train/" + key, value, step=self._round)
-            print("\n\n")
-
+        print("round: ", self._round)
+        print("train: ")
+        print("loss: ", train_result[0])
+        for key, value in train_result[1].items():
+            print(key + ": ", value)
+        print("eval: ")
+        print("loss: ", dev_result[0])
+        for key, value in dev_result[1].items():
+            print(key + ": ", value)
+        print("\n\n")
         return tf.zeros([], tf.bool)
 
     def _build_graph(self):
@@ -529,7 +522,7 @@ class Estimator(object):
                 return round < self._num_round
 
             round = tf.zeros([], tf.int32)
-            fake = tf.equal(round, self._num_round - 1)
+            fake = tf.equal(round, self._num_round)
             inputs = _get_inputs(fake)
             self._run_opt, _ = tf.while_loop(cond, body, [round, inputs], parallel_iterations=1)
 
@@ -557,11 +550,9 @@ class Estimator(object):
         with self._cpu_graph.as_default():
             with self._cpu_session.as_default():
                 self._checkpoint_manager.save()
-        time.sleep(self._run_config.save_delay)
-
-    def _create_tensorboard_writer(self):
-        path = os.path.join(self._run_config.model_dir, "tensorboard/")
-        self._tensorboard_writer = tf.contrib.summary.create_file_writer(path)
+        if self._run_config.drive_path is not None:
+            drive.flush_and_unmount()
+            drive.mount(self._run_config.drive_path)
 
     def get_variable_names(self):
         """
@@ -600,7 +591,6 @@ class Estimator(object):
         _vars = {name: self._cpu_variables[name] for name in names_list}
         result = self._cpu_session.run(_vars)
         return result
-
 
     def import_variables(self, values):
         """
